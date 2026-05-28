@@ -76,12 +76,135 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var isGeneratingAd = MutableStateFlow(false)
 
     init {
-        // Run automated simulator background worker
-        viewModelScope.launch {
+        // Run database setup and automated simulator background worker
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // Ensure the database is populated with initial stores if empty
+                val storeDao = db.storeConfigDao()
+                val currentStores = storeDao.getAllStoreConfigs()
+                if (currentStores.isEmpty()) {
+                    val initialStores = listOf(
+                        StoreConfig(
+                            storeId = "alibaba",
+                            storeName = "AliBaba Sourcing",
+                            affiliateLink = "https://www.alibaba.com",
+                            productCount = 1450,
+                            status = "CONNECTED",
+                            isGatewayActive = true
+                        ),
+                        StoreConfig(
+                            storeId = "etsy",
+                            storeName = "Etsy Affiliate",
+                            affiliateLink = "https://www.etsy.com",
+                            productCount = 380,
+                            status = "CONNECTED",
+                            isGatewayActive = true
+                        ),
+                        StoreConfig(
+                            storeId = "ebay",
+                            storeName = "eBay Connector",
+                            affiliateLink = "https://www.ebay.com",
+                            productCount = 720,
+                            status = "CONNECTED",
+                            isGatewayActive = true
+                        ),
+                        StoreConfig(
+                            storeId = "cjdropshipping",
+                            storeName = "CJ Dropshipping",
+                            affiliateLink = "https://www.cjdropshipping.com/contactus#online",
+                            productCount = 1890,
+                            status = "CONNECTED",
+                            isGatewayActive = true
+                        ),
+                        StoreConfig(
+                            storeId = "digistore24",
+                            storeName = "DigiStore24 Hub",
+                            affiliateLink = "https://www.digistore24.com/redir/431152/globalwarming/",
+                            productCount = 150,
+                            status = "CONNECTED",
+                            isGatewayActive = true
+                        ),
+                        StoreConfig(
+                            storeId = "mercedes",
+                            storeName = "Mercedes-Benz Birmingham",
+                            affiliateLink = "https://www.mbbhm.com/finance/affiliates/",
+                            productCount = 28,
+                            status = "CONNECTED",
+                            isGatewayActive = true
+                        ),
+                        StoreConfig(
+                            storeId = "aliexpress",
+                            storeName = "AliExpress China",
+                            affiliateLink = "https://www.aliexpress.com",
+                            productCount = 2150,
+                            status = "CONNECTED",
+                            isGatewayActive = true
+                        ),
+                        StoreConfig(
+                            storeId = "daraz",
+                            storeName = "Daraz.pk PK Direct",
+                            affiliateLink = "https://www.daraz.pk",
+                            productCount = 920,
+                            status = "CONNECTED",
+                            isGatewayActive = true
+                        ),
+                        StoreConfig(
+                            storeId = "wed2c",
+                            storeName = "Wed2C Emporium",
+                            affiliateLink = "https://theamericanemporiu.wed2c.com",
+                            productCount = 440,
+                            status = "CONNECTED",
+                            isGatewayActive = true
+                        )
+                    )
+                    storeDao.insertStoreConfigs(initialStores)
+                }
+
+                // Check and populate logs as well if empty
+                val logDao = db.agentLogDao()
+                val currentLogs = logDao.getAllLogsFlow().first()
+                if (currentLogs.isEmpty()) {
+                    val initialLogs = listOf(
+                        AgentLog(
+                            agentName = "Sourcing Agent",
+                            subAgentName = "Ali Sourcing Bot",
+                            actionDetails = "Successfully connected and synchronized 1,450 wholesale products from Ali Baba catalog.",
+                            status = "SUCCESS"
+                        ),
+                        AgentLog(
+                            agentName = "Listing & Pricing",
+                            subAgentName = "Store Syncer",
+                            actionDetails = "Exported 42 new active listings with dynamic prices matching profit margin parameters.",
+                            status = "SUCCESS"
+                        ),
+                        AgentLog(
+                            agentName = "Creative Marketer",
+                            subAgentName = "Copy Generator",
+                            actionDetails = "Generated TikTok/Insta ad assets for 'Hot Summer Deal' catalog & dispatched to social pipeline.",
+                            status = "SUCCESS"
+                        ),
+                        AgentLog(
+                            agentName = "Payment & Gateway",
+                            subAgentName = "Vault Router",
+                            actionDetails = "Unified Gateway validated standard API routes with 100% active operational uptime.",
+                            status = "SUCCESS"
+                        )
+                    )
+                    initialLogs.forEach { logDao.insertLog(it) }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
+            // Loop simulator logs animation background worker
             while (true) {
-                delay(12000) // Trigger task flow animation logs every 12 seconds
+                delay(12000)
                 if (isSystemLive.value) {
-                    executeAutomatedStep()
+                    try {
+                        executeAutomatedStep()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
                 }
             }
         }
