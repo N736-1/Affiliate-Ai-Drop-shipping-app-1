@@ -1,0 +1,6 @@
+{
+  "name": "OmniLink AI",
+  "description": "Multi-store automated e-commerce network monitor and AI management console featuring 4 primary agents, 9 store connectors, and budget forecasting tracker.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
