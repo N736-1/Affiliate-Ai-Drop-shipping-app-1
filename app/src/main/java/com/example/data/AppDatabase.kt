@@ -6,10 +6,23 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import kotlinx.coroutines.CoroutineScope
 
-@Database(entities = [AgentLog::class, StoreConfig::class], version = 1, exportSchema = false)
+@Database(
+    entities = [
+        AgentLog::class,
+        StoreConfig::class,
+        MercedesCar::class,
+        CartItem::class,
+        OrderRecord::class
+    ],
+    version = 2,
+    exportSchema = false
+)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun agentLogDao(): AgentLogDao
     abstract fun storeConfigDao(): StoreConfigDao
+    abstract fun mercedesCarDao(): MercedesCarDao
+    abstract fun cartItemDao(): CartItemDao
+    abstract fun orderRecordDao(): OrderRecordDao
 
     companion object {
         @Volatile

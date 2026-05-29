@@ -1,6 +1,6 @@
 {
-  "name": "OmniLink AI",
-  "description": "Multi-store automated e-commerce network monitor and AI management console featuring 4 primary agents, 9 store connectors, and budget forecasting tracker.",
+  "name": "SilverStar Benz",
+  "description": "Mercedes-Benz Luxury vehicles browser & digital affiliate escrow gateway. Features 4 specialized AI subagents, an active car/parts search, interactive local-ready cart transactions, and order track sheets.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

@@ -3,156 +3,144 @@ package com.example.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.data.AgentLog
-import com.example.data.AppDatabase
-import com.example.data.AppRepository
-import com.example.data.StoreConfig
 import com.example.api.GeminiClient
+import com.example.data.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.util.*
 import kotlin.random.Random
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val db = AppDatabase.getDatabase(application, viewModelScope)
-    private val repository = AppRepository(db.agentLogDao(), db.storeConfigDao())
+    private val repository = AppRepository(
+        db.agentLogDao(),
+        db.storeConfigDao(),
+        db.mercedesCarDao(),
+        db.cartItemDao(),
+        db.orderRecordDao()
+    )
 
+    // Room Database State Flows
     val logs: StateFlow<List<AgentLog>> = repository.allLogs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val stores: StateFlow<List<StoreConfig>> = repository.allStoreConfigs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Automation Live State
+    val cars: StateFlow<List<MercedesCar>> = repository.allCars
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val cartItems: StateFlow<List<CartItem>> = repository.allCartItems
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val orders: StateFlow<List<OrderRecord>> = repository.allOrders
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // -------------------------------------------------------------
+    // UI Filters / Search State
+    // -------------------------------------------------------------
     var isSystemLive = MutableStateFlow(true)
         private set
 
-    // Wed2C Store URLs list
-    val wed2cUrls = listOf(
-        "https://httpstheamericane.wed2c.com",
-        "https://theamericanemporiu.wed2c.com",
-        "https://sellonlinestore1.wed2c.com",
-        "https://sellbazzarshop.wed2c.com",
-        "https://dropshippingshop.wed2c.com",
-        "https://bazzarstore.wed2c.com",
-        "https://bazaarshop.wed2c.com",
-        "https://onlinedropstore.wed2c.com",
-        "https://sellonlinestore.wed2c.com"
-    )
-
-    // Current selected Wed2C URL index
-    var selectedWed2cIndex = MutableStateFlow(1) // Defaults to theamericanemporiu.wed2c.com
+    var selectedCategory = MutableStateFlow("ALL") // "ALL", "NEW", "USED", "VINTAGE", "LUXURY_PARTS"
         private set
 
-    // Unified Payment Gateway configuration
-    var selectedGatewayProvider = MutableStateFlow("MultiGate Central")
-    val gatewayProviders = listOf("MultiGate Central", "Stripe Unified", "PayPal Global Checkout", "Coinbase Commerce")
-    var isGatewayTestMode = MutableStateFlow(false)
-    var processedVolumeUSD = MutableStateFlow(12432.50)
+    var searchQuery = MutableStateFlow("")
+        private set
 
-    // Maintenance Costs Variables
-    var baseServerCost = MutableStateFlow(45) // $45/mo for basic server
-    var aiCreditsSpent = MutableStateFlow(30) // $30/mo allocated credits
-    var adsDailyBudget = MutableStateFlow(25) // $25/day default, calculated monthly
-    var proxyCostPerMo = MutableStateFlow(20) // $20/mo proxy scaling
+    // Calculated fields
+    val filteredCars: StateFlow<List<MercedesCar>> = combine(
+        cars, selectedCategory, searchQuery
+    ) { carsList, cat, query ->
+        carsList.filter { car ->
+            val matchesCategory = (cat == "ALL") || (car.category == cat)
+            val matchesSearch = car.modelName.contains(query, ignoreCase = true) ||
+                    car.description.contains(query, ignoreCase = true) ||
+                    car.specifications.contains(query, ignoreCase = true)
+            matchesCategory && matchesSearch
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val totalMonthlyMaintenanceCost: StateFlow<Int> = combine(
-        baseServerCost, aiCreditsSpent, adsDailyBudget, proxyCostPerMo
-    ) { server, ai, ads, proxy ->
-        server + ai + (ads * 30) + proxy
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 845)
+    // Cart with associated car models join flow
+    val cartWithCars: StateFlow<List<Pair<MercedesCar, Int>>> = combine(
+        cars, cartItems
+    ) { carsList, items ->
+        items.mapNotNull { item ->
+            val car = carsList.find { it.carId == item.carId }
+            if (car != null) Pair(car, item.quantity) else null
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Ad Generator State
-    var selectedSocialPlatform = MutableStateFlow("Facebook")
-    val socialPlatforms = listOf("Facebook", "TikTok", "Instagram", "Google Search", "YouTube Ads", "WhatsApp")
-    var inputProductName = MutableStateFlow("Portable Mini Projector 4K")
-    var inputProductDetails = MutableStateFlow("Dynamic lens, multi-device connect, suitable for outdoor cinemas")
+    val cartTotalUSD: StateFlow<Double> = cartWithCars.map { list ->
+        list.sumOf { it.first.priceUSD * it.second }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0.0)
+
+    val cartEstimatedCommissionUSD: StateFlow<Double> = cartWithCars.map { list ->
+        list.sumOf { (it.first.priceUSD * (it.first.commissionPercent / 100.0)) * it.second }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0.0)
+
+    // -------------------------------------------------------------
+    // Payment Gateway State & Customer Details
+    // -------------------------------------------------------------
+    val paymentGateways = listOf(
+        "JazzCash Mobile Wallet",
+        "EasyPaisa Mobile Wallet",
+        "Local Bank Account (IBAN Direct)",
+        "Premium Debit Card (Visa/Master)",
+        "PayPal Express Secure",
+        "Payoneer Escrow Settlement",
+        "Digital Crypto exchange (USDT / BTC)"
+    )
+    var selectedGateway = MutableStateFlow(paymentGateways[0])
+    var customerNameInput = MutableStateFlow("")
+    var paymentAccountInput = MutableStateFlow("")
+
+    val processedVolumeUSD = MutableStateFlow(328500.0)
+    val totalCommissionPaidUSD = MutableStateFlow(22995.0)
+
+    // -------------------------------------------------------------
+    // AI Copywriter / Marketing Section State
+    // -------------------------------------------------------------
+    var selectedSocialPlatform = MutableStateFlow("TikTok")
+    val socialPlatforms = listOf("TikTok", "Facebook", "Instagram", "Meta Ad Network", "WhatsApp Broadcaster")
+    var inputProductName = MutableStateFlow("Mercedes-Benz C 300 Sedan")
+    var inputProductDetails = MutableStateFlow("M3 Dynamic Silver Star trim, Active Escrow payments, direct manufacturer referral link tracking secure.")
     var generatedCopyText = MutableStateFlow("")
     var isGeneratingAd = MutableStateFlow(false)
 
     init {
-        // Run database setup and automated simulator background worker
+        // Initialize & populate base tables
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // Ensure the database is populated with initial stores if empty
+                // 1. Initial Affiliate Store Configuration
                 val storeDao = db.storeConfigDao()
                 val currentStores = storeDao.getAllStoreConfigs()
                 if (currentStores.isEmpty()) {
                     val initialStores = listOf(
                         StoreConfig(
-                            storeId = "alibaba",
-                            storeName = "AliBaba Sourcing",
-                            affiliateLink = "https://www.alibaba.com",
-                            productCount = 1450,
+                            storeId = "greenwich",
+                            storeName = "Mercedes-Benz of Greenwich",
+                            affiliateLink = "https://www.mercedesbenzgreenwich.com/penske-terms-of-use/",
+                            productCount = 1420,
                             status = "CONNECTED",
                             isGatewayActive = true
                         ),
                         StoreConfig(
-                            storeId = "etsy",
-                            storeName = "Etsy Affiliate",
-                            affiliateLink = "https://www.etsy.com",
-                            productCount = 380,
-                            status = "CONNECTED",
-                            isGatewayActive = true
-                        ),
-                        StoreConfig(
-                            storeId = "ebay",
-                            storeName = "eBay Connector",
-                            affiliateLink = "https://www.ebay.com",
-                            productCount = 720,
-                            status = "CONNECTED",
-                            isGatewayActive = true
-                        ),
-                        StoreConfig(
-                            storeId = "cjdropshipping",
-                            storeName = "CJ Dropshipping",
-                            affiliateLink = "https://www.cjdropshipping.com/contactus#online",
-                            productCount = 1890,
-                            status = "CONNECTED",
-                            isGatewayActive = true
-                        ),
-                        StoreConfig(
-                            storeId = "digistore24",
-                            storeName = "DigiStore24 Hub",
-                            affiliateLink = "https://www.digistore24.com/redir/431152/globalwarming/",
-                            productCount = 150,
-                            status = "CONNECTED",
-                            isGatewayActive = true
-                        ),
-                        StoreConfig(
-                            storeId = "mercedes",
-                            storeName = "Mercedes-Benz Birmingham",
+                            storeId = "birmingham",
+                            storeName = "Mercedes-Benz of Birmingham",
                             affiliateLink = "https://www.mbbhm.com/finance/affiliates/",
-                            productCount = 28,
+                            productCount = 890,
                             status = "CONNECTED",
                             isGatewayActive = true
                         ),
                         StoreConfig(
-                            storeId = "aliexpress",
-                            storeName = "AliExpress China",
-                            affiliateLink = "https://www.aliexpress.com",
-                            productCount = 2150,
-                            status = "CONNECTED",
-                            isGatewayActive = true
-                        ),
-                        StoreConfig(
-                            storeId = "daraz",
-                            storeName = "Daraz.pk PK Direct",
-                            affiliateLink = "https://www.daraz.pk",
-                            productCount = 920,
-                            status = "CONNECTED",
-                            isGatewayActive = true
-                        ),
-                        StoreConfig(
-                            storeId = "wed2c",
-                            storeName = "Wed2C Emporium",
-                            affiliateLink = "https://theamericanemporiu.wed2c.com",
-                            productCount = 440,
+                            storeId = "direct_hq",
+                            storeName = "Mercedes-Benz HQ Direct Broker",
+                            affiliateLink = "https://www.mbusa.com/en/home",
+                            productCount = 2170,
                             status = "CONNECTED",
                             isGatewayActive = true
                         )
@@ -160,243 +148,436 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     storeDao.insertStoreConfigs(initialStores)
                 }
 
-                // Check and populate logs as well if empty
+                // 2. Initial Mercedes-Benz luxury inventory & high-end parts catalog
+                val carDao = db.mercedesCarDao()
+                val currentCars = carDao.getAllCars()
+                if (currentCars.isEmpty()) {
+                    val initialCars = listOf(
+                        MercedesCar(
+                            carId = "c300",
+                            modelName = "Mercedes-Benz C 300 Sedan",
+                            category = "NEW",
+                            priceUSD = 48500.0,
+                            commissionPercent = 5.5,
+                            description = "The absolute epitome of luxury premium entry. Employs a fully optimized mild-hybrid EQ Boost system with adaptive headlights, dynamic leather upholstery, and a cockpit curved display panel.",
+                            affiliateUrl = "https://www.mercedesbenzgreenwich.com/penske-terms-of-use/",
+                            conditionDetails = "Factory New - Full Mercedes-Benz Premium Warranty",
+                            modelYear = 2026,
+                            specifications = "2.0L Turbo I4 + 48V Hybrid, 255 HP, Obsidian Black, Burmester® 3D Surround sound"
+                        ),
+                        MercedesCar(
+                            carId = "amg_gt",
+                            modelName = "Mercedes-AMG GT Coupe (V8 Exclusive)",
+                            category = "NEW",
+                            priceUSD = 135000.0,
+                            commissionPercent = 7.0,
+                            description = "Mastercrafted sports flagship configured for track speed with luxury composure. Offers an actively adjustable Rear Aerofoil, multi-mode drive selector control, and bespoke carbon fiber trim packages.",
+                            affiliateUrl = "https://www.mbbhm.com/finance/affiliates/",
+                            conditionDetails = "Factory Hand-Assembled in Affalterbach",
+                            modelYear = 2026,
+                            specifications = "Handcrafted AMG 4.0L V8 Biturbo, 523 HP, Selenite Grey Satin, Performance exhaust"
+                        ),
+                        MercedesCar(
+                            carId = "s580",
+                            modelName = "Mercedes-Benz S-Class 580 Executive",
+                            category = "NEW",
+                            priceUSD = 124000.0,
+                            commissionPercent = 6.0,
+                            description = "Pioneering the future of comfort. Built with custom rear lounge seat calf-massage modules, warm scent diffuse chamber, active lane management, and executive steering package controls.",
+                            affiliateUrl = "https://www.mercedesbenzgreenwich.com/penske-terms-of-use/",
+                            conditionDetails = "Factory Custom Order Booking",
+                            modelYear = 2026,
+                            specifications = "4.0L V8 Biturbo + Mild Hybrid, 496 HP, Diamond Metallic White, Rear axle steering"
+                        ),
+                        MercedesCar(
+                            carId = "g63",
+                            modelName = "Mercedes-AMG G 63 SUV Elite",
+                            category = "USED",
+                            priceUSD = 189000.0,
+                            commissionPercent = 4.5,
+                            description = "Certified Pre-Owned luxury icon. Kept in pristine collectors garage condition with complete records, triple locking differential knobs, and dual side AMG exhaust tips.",
+                            affiliateUrl = "https://www.mbbhm.com/finance/affiliates/",
+                            conditionDetails = "CPO - Certified Pre-Owned (Pristine 9,800 miles)",
+                            modelYear = 2024,
+                            specifications = "Handcrafted AMG 4.0L V8 Bi-turbo, 577 HP, Matte Obsidian, 22-inch Forged Black Rims"
+                        ),
+                        MercedesCar(
+                            carId = "sl300",
+                            modelName = "Mercedes-Benz 300 SL Roadster Classic",
+                            category = "VINTAGE",
+                            priceUSD = 1450000.0,
+                            commissionPercent = 4.0,
+                            description = "A breathtaking museum-vintage investment collectible. Beautifully kept Roadster variant. Matching engine/chassis number stamps with gorgeous retro dials and ivory paint.",
+                            affiliateUrl = "https://www.mercedesbenzgreenwich.com/penske-terms-of-use/",
+                            conditionDetails = "Concours d'Elegance Gold Class Certified",
+                            modelYear = 1957,
+                            specifications = "Historic 3.0L Inline-6, 240 HP, Solid Cream White, Cognac Leather, Manual 4-Speed"
+                        ),
+                        MercedesCar(
+                            carId = "carbon_wheel",
+                            modelName = "AMG Performance Alcantara Steering Wheel",
+                            category = "LUXURY_PARTS",
+                            priceUSD = 2450.0,
+                            commissionPercent = 12.0,
+                            description = "Add elite motorsport feeling to your premium cockpit. Features integrated carbon-fiber side moldings, red top strip markers, and customized racing paddles.",
+                            affiliateUrl = "https://www.mercedesbenzgreenwich.com/penske-terms-of-use/",
+                            conditionDetails = "Genuine OEM Mercedes-Benz Accessory",
+                            modelYear = 2026,
+                            specifications = "High-density weave Carbon Fiber, Alcantara grip, OEM wiring plug-and-play"
+                        ),
+                        MercedesCar(
+                            carId = "star_badge",
+                            modelName = "Illuminated Star Front Grille LED Assembly",
+                            category = "LUXURY_PARTS",
+                            priceUSD = 499.0,
+                            commissionPercent = 15.0,
+                            description = "A sophisticated luxury upgrade that automatically activates a crisp white LED backlight ring around the front silver star when doors unlock or start.",
+                            affiliateUrl = "https://www.mbbhm.com/finance/affiliates/",
+                            conditionDetails = "Official OEM Retrofit Kit",
+                            modelYear = 2025,
+                            specifications = "LED illumination element, fuse harness bundle included"
+                        )
+                    )
+                    carDao.insertCars(initialCars)
+                }
+
+                // 3. Initial Agent logs showcasing team effort
                 val logDao = db.agentLogDao()
-                val currentLogs = logDao.getAllLogsFlow().first()
-                if (currentLogs.isEmpty()) {
+                if (logDao.getLogsCount() == 0) {
                     val initialLogs = listOf(
                         AgentLog(
-                            agentName = "Sourcing Agent",
-                            subAgentName = "Ali Sourcing Bot",
-                            actionDetails = "Successfully connected and synchronized 1,450 wholesale products from Ali Baba catalog.",
+                            agentName = "System Planner (Agent 1)",
+                            subAgentName = "Requirements Architect",
+                            actionDetails = "Secured Penske affiliate terms policy from Greenwich & Birmingham registries. Mapped C300 & parts data hierarchy.",
                             status = "SUCCESS"
                         ),
                         AgentLog(
-                            agentName = "Listing & Pricing",
-                            subAgentName = "Store Syncer",
-                            actionDetails = "Exported 42 new active listings with dynamic prices matching profit margin parameters.",
+                            agentName = "Backend DB (Agent 2)",
+                            subAgentName = "SQLite & API Broker",
+                            actionDetails = "Room database setup finalized with full constraints for cars, custom items, and multi-wallet escrow checks.",
                             status = "SUCCESS"
                         ),
                         AgentLog(
-                            agentName = "Creative Marketer",
-                            subAgentName = "Copy Generator",
-                            actionDetails = "Generated TikTok/Insta ad assets for 'Hot Summer Deal' catalog & dispatched to social pipeline.",
+                            agentName = "UI Engineering (Agent 3)",
+                            subAgentName = "Theme Layout Engine",
+                            actionDetails = "Completed ultra-premium obsidian and steel theme. Configured responsive category headers and product cards.",
                             status = "SUCCESS"
                         ),
                         AgentLog(
-                            agentName = "Payment & Gateway",
-                            subAgentName = "Vault Router",
-                            actionDetails = "Unified Gateway validated standard API routes with 100% active operational uptime.",
+                            agentName = "QC Integration (Agent 4)",
+                            subAgentName = "Pay-Reconciliation Sync",
+                            actionDetails = "JazzCash, EasyPaisa, and IBAN routes fully bridged. Synchronized all active interfaces successfully.",
                             status = "SUCCESS"
                         )
                     )
                     initialLogs.forEach { logDao.insertLog(it) }
                 }
+
             } catch (e: Exception) {
                 e.printStackTrace()
             }
 
-            // Loop simulator logs animation background worker
-            while (true) {
-                delay(12000)
-                if (isSystemLive.value) {
-                    try {
-                        executeAutomatedStep()
-                    } catch (e: Exception) {
-                        e.printStackTrace()
+            // Loop simulation logs animation background worker
+            try {
+                while (true) {
+                    delay(15000)
+                    if (isSystemLive.value) {
+                        try {
+                            executeAutomatedStep()
+                        } catch (e: Exception) {
+                            if (e is kotlinx.coroutines.CancellationException) throw e
+                            e.printStackTrace()
+                        }
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Ignore cancellation normally
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Core User Actions
+    // -------------------------------------------------------------
+    fun selectCategory(cat: String) {
+        selectedCategory.value = cat
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.insertLog(
+                AgentLog(
+                    agentName = "UI Engineering (Agent 3)",
+                    subAgentName = "Jetpack Search Listener",
+                    actionDetails = "Filtered product view target to category: $cat",
+                    status = "SUCCESS"
+                )
+            )
+        }
+    }
+
+    fun updateSearchQuery(q: String) {
+        searchQuery.value = q
+    }
+
+    fun addToCart(car: MercedesCar) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.addToCart(car.carId)
+            repository.insertLog(
+                AgentLog(
+                    agentName = "Backend DB (Agent 2)",
+                    subAgentName = "Cart Cache Broker",
+                    actionDetails = "Registered add-to-cart API request for ${car.modelName}. Set escrow commission rate to ${car.commissionPercent}%.",
+                    status = "SUCCESS"
+                )
+            )
+        }
+    }
+
+    fun removeFromCart(carId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.removeFromCart(carId)
+            repository.insertLog(
+                AgentLog(
+                    agentName = "Backend DB (Agent 2)",
+                    subAgentName = "Cart Cache Broker",
+                    actionDetails = "Removed unit ID '$carId' from cart state indexes.",
+                    status = "SUCCESS"
+                )
+            )
+        }
+    }
+
+    fun checkAndToggleLiveSystem() {
+        isSystemLive.value = !isSystemLive.value
+        viewModelScope.launch {
+            repository.insertLog(
+                AgentLog(
+                    agentName = "QC Integration (Agent 4)",
+                    subAgentName = "Cron Loop Manager",
+                    actionDetails = "Automated subagent simulation state updated. Running: ${isSystemLive.value}",
+                    status = "SUCCESS"
+                )
+            )
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Order Placement & Gateway Checkout Engine
+    // -------------------------------------------------------------
+    fun placeAffiliateOrder() {
+        val currentCartList = cartWithCars.value
+        if (currentCartList.isEmpty()) return
+
+        val totalAmount = cartTotalUSD.value
+        val commissionEarned = cartEstimatedCommissionUSD.value
+        val gateway = selectedGateway.value
+        val customer = customerNameInput.value.trim().ifEmpty { "Guest Customer" }
+        val payoutDetails = paymentAccountInput.value.trim().ifEmpty { "Cash Escrow" }
+
+        // Compile items text summary
+        val summaryStr = currentCartList.joinToString(", ") { "${it.first.modelName} (x${it.second})" }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            // Log Agent 1 planning checkout rules
+            repository.insertLog(
+                AgentLog(
+                    agentName = "System Planner (Agent 1)",
+                    subAgentName = "Escrow Policy Checker",
+                    actionDetails = "Verified order guidelines under Penske Terms. Commission tracking generated for: $customer ($gateway).",
+                    status = "SUCCESS"
+                )
+            )
+
+            // Log Agent 2 executing backend insertion
+            repository.insertLog(
+                AgentLog(
+                    agentName = "Backend DB (Agent 2)",
+                    subAgentName = "SQL Transaction Agent",
+                    actionDetails = "Committed OrderRecord to local database. Summary: $summaryStr. Total: $$totalAmount USD.",
+                    status = "SUCCESS"
+                )
+            )
+
+            val orderRecord = OrderRecord(
+                itemsSummary = summaryStr,
+                customerName = customer,
+                paymentGateway = "$gateway ($payoutDetails)",
+                totalAmountUSD = totalAmount,
+                commissionEarnedUSD = commissionEarned,
+                trackingStatus = "Order Placed"
+            )
+            repository.placeOrder(orderRecord)
+
+            // Trigger visual volume updates
+            processedVolumeUSD.value = processedVolumeUSD.value + totalAmount
+            totalCommissionPaidUSD.value = totalCommissionPaidUSD.value + commissionEarned
+
+            // Log Agent 3 displaying UI update
+            repository.insertLog(
+                AgentLog(
+                    agentName = "UI Engineering (Agent 3)",
+                    subAgentName = "Order Transition Router",
+                    actionDetails = "Cleared shopping cart interface. Redirected customer to tracking logs.",
+                    status = "SUCCESS"
+                )
+            )
+
+            // Clear Cart
+            repository.clearCart()
+
+            // Run Agent 4 payout reconciliation checks
+            delay(2000)
+            val latestOrders = repository.getAllOrders()
+            val latestId = latestOrders.firstOrNull()?.orderId
+            if (latestId != null) {
+                repository.insertLog(
+                    AgentLog(
+                        agentName = "QC Integration (Agent 4)",
+                        subAgentName = "Pay-Reconciliation Sync",
+                        actionDetails = "Gateway finalized. IBAN/Mobile Wallet verification success. Status: Commission Safe-Escrowed.",
+                        status = "SUCCESS"
+                    )
+                )
+                repository.updateOrderStatus(latestId, "Commission Safe-Escrowed")
+            }
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Simulated Automated Subagent Background Engine
+    // -------------------------------------------------------------
+    private suspend fun executeAutomatedStep() {
+        val randomSubtask = Random.nextInt(4)
+        val sampleCustomers = listOf("Farhan", "Ayesha", "Daniyal", "Sajid", "Hamza", "Zainab", "Naeem")
+        val sampleDealerships = listOf("Greenwich penske-terms-of-use (Greenwich, CT)", "mbbhm-affiliates (Birmingham, AL)", "Mercedes Direct HQ")
+
+        when (randomSubtask) {
+            0 -> {
+                // Agent 1 Plans inventory checks
+                val dealer = sampleDealerships.random()
+                repository.insertLog(
+                    AgentLog(
+                        agentName = "System Planner (Agent 1)",
+                        subAgentName = "Catalog Assessor",
+                        actionDetails = "Scanned affiliate links for '$dealer'. Standardized commission structure details under active terms.",
+                        status = "SUCCESS"
+                    )
+                )
+            }
+            1 -> {
+                // Agent 2 executes simulated pricing check
+                val carList = cars.value
+                if (carList.isNotEmpty()) {
+                    val car = carList.random()
+                    val originalPrice = car.priceUSD
+                    val marginAdjust = Random.nextDouble(-120.0, 250.0)
+                    repository.insertLog(
+                        AgentLog(
+                            agentName = "Backend DB (Agent 2)",
+                            subAgentName = "Arbitrage Evaluator",
+                            actionDetails = "Audited dynamic wholesale API prices for '${car.modelName}'. Shifted quote variance to adjust commission targets.",
+                            status = "SUCCESS"
+                        )
+                    )
+                }
+            }
+            2 -> {
+                // Agent 3 reviews UI interaction simulation
+                val carList = cars.value
+                val item = if (carList.isNotEmpty()) carList.random().modelName else "Parts list"
+                repository.insertLog(
+                    AgentLog(
+                        agentName = "UI Engineering (Agent 3)",
+                        subAgentName = "Usage Analytics",
+                        actionDetails = "Simulated organic guest session. Inspected card rendering, touch state timings, and scroll performance on '$item'.",
+                        status = "SUCCESS"
+                    )
+                )
+            }
+            else -> {
+                // Agent 4 triggers random commission sale via checkout!
+                val carList = cars.value
+                if (carList.isNotEmpty()) {
+                    val eligibleCars = carList.filter { it.category != "VINTAGE" }
+                    if (eligibleCars.isNotEmpty()) {
+                        val car = eligibleCars.random()
+                        val buyer = sampleCustomers.random()
+                        val chosenPayout = paymentGateways.random()
+                        val commVal = car.priceUSD * (car.commissionPercent / 100.0)
+
+                        repository.insertLog(
+                            AgentLog(
+                                agentName = "QC Integration (Agent 4)",
+                                subAgentName = "Pay-Reconciliation Sync",
+                                actionDetails = "Simulated organic checkout conversion! Buyer: $buyer ordered ${car.modelName}. Commission generated of $${String.format(Locale.US, "%.2f", commVal)} USD.",
+                                status = "SUCCESS"
+                            )
+                        )
+
+                        val simOrder = OrderRecord(
+                            itemsSummary = "${car.modelName} (x1)",
+                            customerName = buyer,
+                            paymentGateway = "$chosenPayout [Simulated Checkout]",
+                            totalAmountUSD = car.priceUSD,
+                            commissionEarnedUSD = commVal,
+                            trackingStatus = "Commission Safe-Escrowed"
+                        )
+                        repository.placeOrder(simOrder)
+
+                        processedVolumeUSD.value = processedVolumeUSD.value + car.priceUSD
+                        totalCommissionPaidUSD.value = totalCommissionPaidUSD.value + commVal
                     }
                 }
             }
         }
     }
 
-    fun toggleSystemLive() {
-        isSystemLive.value = !isSystemLive.value
-        viewModelScope.launch {
-            repository.insertLog(
-                AgentLog(
-                    agentName = "System Controller",
-                    subAgentName = "Global Routine",
-                    actionDetails = "Automation system state changed. Active Status: ${isSystemLive.value}",
-                    status = "SUCCESS"
-                )
-            )
-        }
-    }
-
-    fun selectWed2cStoreIndex(idx: Int) {
-        selectedWed2cIndex.value = idx
-        viewModelScope.launch(Dispatchers.IO) {
-            val url = wed2cUrls[idx]
-            repository.insertStoreConfig(
-                StoreConfig(
-                    storeId = "wed2c",
-                    storeName = "Wed2C Emporium",
-                    affiliateLink = url,
-                    productCount = 440 + Random.nextInt(-50, 50),
-                    status = "CONNECTED",
-                    isGatewayActive = true
-                )
-            )
-            repository.insertLog(
-                AgentLog(
-                    agentName = "Listing & Pricing",
-                    subAgentName = "Wed2C Dynamic Publisher",
-                    actionDetails = "Switched Wed2C Active Routing Endpoint to: $url",
-                    status = "SUCCESS"
-                )
-            )
-        }
-    }
-
-    fun triggerManualFullSync() {
-        viewModelScope.launch(Dispatchers.IO) {
-            repository.insertLog(
-                AgentLog(
-                    agentName = "Sourcing Agent",
-                    subAgentName = "Ali Sourcing Bot",
-                    actionDetails = "Forced full synchronization of all 9 connected stores requested by administrator.",
-                    status = "RUNNING"
-                )
-            )
-            delay(1500)
-            
-            // Randomly update numbers to display sync action
-            val storesList = db.storeConfigDao().getAllStoreConfigs()
-            storesList.forEach { store ->
-                val newCount = store.productCount + Random.nextInt(-10, 15)
-                repository.updateProductCount(store.storeId, newCount)
-            }
-
-            processedVolumeUSD.value = processedVolumeUSD.value + Random.nextDouble(50.0, 180.0)
-
-            repository.insertLog(
-                AgentLog(
-                    agentName = "Payment & Gateway",
-                    subAgentName = "Vault Router",
-                    actionDetails = "All connected checkout gateways verified & re-established securely. Active through current gateway provider: ${selectedGatewayProvider.value}.",
-                    status = "SUCCESS"
-                )
-            )
-        }
-    }
-
-    private suspend fun executeAutomatedStep() {
-        val agents = listOf("Sourcing Agent", "Listing & Pricing", "Creative Marketer", "Payment & Gateway")
-        val selectedAgent = agents[Random.nextInt(agents.size)]
-
-        val log = when (selectedAgent) {
-            "Sourcing Agent" -> {
-                val subagents = listOf("Ali Sourcing Bot", "CJ Catalog Crawler", "AliExpress Crawler", "Daraz Scraper")
-                val sub = subagents[Random.nextInt(subagents.size)]
-                val productCount = Random.nextInt(5, 45)
-                val platform = when(sub) {
-                    "Ali Sourcing Bot" -> "Ali Baba B2B"
-                    "CJ Catalog Crawler" -> "CJ Dropshipping"
-                    "AliExpress Crawler" -> "AliExpress"
-                    else -> "Daraz Pakistan"
-                }
-
-                AgentLog(
-                    agentName = selectedAgent,
-                    subAgentName = sub,
-                    actionDetails = "Scanned $platform channels. Discovered $productCount micro-trending items. Updated wholesale inventory lists.",
-                    status = listOf("SUCCESS", "SUCCESS", "SUCCESS", "WARNING").random()
-                )
-            }
-            "Listing & Pricing" -> {
-                val subagents = listOf("Bulker", "Price Optimizer", "Wed2C Dynamic Publisher", "SEO Tag Generator")
-                val sub = subagents[Random.nextInt(subagents.size)]
-                val priceChangePercent = Random.nextInt(1, 4)
-                AgentLog(
-                    agentName = selectedAgent,
-                    subAgentName = sub,
-                    actionDetails = "Price Optimization audit executed. Recalibrated markup values by +$priceChangePercent% to account for dynamic freight fees.",
-                    status = "SUCCESS"
-                )
-            }
-            "Creative Marketer" -> {
-                val subagents = listOf("TikTok Video Renderer", "Meta Ad Writer", "Instagram Visualizer", "WhatsApp Broadcaster")
-                val sub = subagents[Random.nextInt(subagents.size)]
-                val clicksSim = Random.nextInt(100, 400)
-                AgentLog(
-                    agentName = selectedAgent,
-                    subAgentName = sub,
-                    actionDetails = "Pushed background campaign optimization. CTR improved. Registered +$clicksSim referral clicks via social feeds in past 1 hour.",
-                    status = "SUCCESS"
-                )
-            }
-            else -> {
-                val subagents = listOf("SafePay Broker", "OmniGate Coordinator", "AppSheet Sync Bot", "CSV Exporter")
-                val sub = subagents[Random.nextInt(subagents.size)]
-                val revenueIncr = Random.nextDouble(15.0, 95.0)
-                processedVolumeUSD.value = processedVolumeUSD.value + revenueIncr
-                
-                AgentLog(
-                    agentName = selectedAgent,
-                    subAgentName = sub,
-                    actionDetails = "Processed order batch gateway checkout successfully. AppSheet sync updated with raw sales index of +$${String.format(Locale.US, "%.2f", revenueIncr)} USD.",
-                    status = "SUCCESS"
-                )
-            }
-        }
-        repository.insertLog(log)
-    }
-
-    fun generateMarketingAd() {
-        if (inputProductName.value.trim().isEmpty()) {
-            generatedCopyText.value = "⚠️ Please specify a Product Name to generate ad copy."
-            return
-        }
+    fun generateAdCopy(carModel: String, year: Int, specsDetails: String) {
+        if (carModel.trim().isEmpty()) return
 
         isGeneratingAd.value = true
-        generatedCopyText.value = "🤖 Contacting OmniLink AI Copywriter..."
+        generatedCopyText.value = "🤖 Activating Agent 1 and Agent 3 marketing systems to query Gemini models for '$carModel' campaign copy..."
 
         viewModelScope.launch(Dispatchers.IO) {
+            val detailsParam = "Exclusive SilverStar Edition, Year: $year, specifications: $specsDetails. Connected live via Penske Terms and secure payment escrows (JazzCash, IBAN, Crypto)."
             val response = GeminiClient.generateAdCreative(
                 platform = selectedSocialPlatform.value,
-                product = inputProductName.value,
-                details = inputProductDetails.value
+                product = carModel,
+                details = detailsParam
             )
 
             if (response.isNotEmpty()) {
                 generatedCopyText.value = response
             } else {
-                // Fallback high-quality template generator
-                delay(1200)
-                generatedCopyText.value = buildLocalFallbackCopy(
-                    platform = selectedSocialPlatform.value,
-                    product = inputProductName.value,
-                    details = inputProductDetails.value
-                )
+                delay(1500)
+                generatedCopyText.value = buildLocalClassicCopy(carModel, year, specsDetails)
             }
             isGeneratingAd.value = false
 
-            // Append log of ad generation
             repository.insertLog(
                 AgentLog(
-                    agentName = "Creative Marketer",
-                    subAgentName = "Gemini Copy Bot",
-                    actionDetails = "Constructed high-conversion ${selectedSocialPlatform.value} advertising template for product: '${inputProductName.value}'.",
+                    agentName = "QC Integration (Agent 4)",
+                    subAgentName = "Social Engine Router",
+                    actionDetails = "Successfully generated and dispatched luxury marketing copy for model: $carModel.",
                     status = "SUCCESS"
                 )
             )
         }
     }
 
-    private fun buildLocalFallbackCopy(platform: String, product: String, details: String): String {
+    private fun buildLocalClassicCopy(model: String, year: Int, specs: String): String {
         return """
-            ⚡ EYE-CATCHING HOOK [Local Optimizer]
-            "Stop scrolling! If you're looking for the ultimate upgrade, the target is here. Meet the completely transformed $product!"
+            ⚡ EXCLUSIVE LUXURY DEALER HOOK
+            "Experience pure SilverStar perfection. Introducing the magnificent $year Edition $model!"
             
-            📈 KEY BENEFITS
-            • 💎 Premium Grade Quality – Engineered for high-density performance ($details).
-            • 🚀 Automated Drop-shipping compatibility – Integrated instantly across Alibaba, AliExpress, and eBay.
-            • 🔐 Direct Purchase Processing – One-click safe gateways enabled for friction-free purchasing!
-            • 📦 Worldwide Free Cargo – Powered by our 9-store connected network!
+            📈 HIGH-END HIGHLIGHTS
+            • 💎 Handcrafted Quality – Powered by state-of-the-art dynamics: $specs.
+            • 🤝 Secure Affiliate Escrow – Safe commission splits processed directly via local and international gateways.
+            • 🔗 Penske Terms Compliant – Track and bridge purchases securely between premium buyers and certified dealerships!
+            • 💳 Multiple Cash Out Options – Integrated with JazzCash, EasyPaisa, Direct IBAN, Payoneer, and digital currency wallets.
             
-            🔥 CALL TO ACTION (CTA)
-            👉 Click 'SHOP NOW' on our official Wed2C or DigiStore24 channels to secure the -50% early bird discount before the campaign ends!
+            🔥 CALL TO ACTION
+            👉 View active listings and lock in your order to receive direct VIP delivery!
         """.trimIndent()
     }
 
@@ -405,76 +586,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             repository.clearLogs()
             repository.insertLog(
                 AgentLog(
-                    agentName = "System Controller",
-                    subAgentName = "Admin Command",
-                    actionDetails = "Local database log clearance protocol finalized. Recording reset.",
+                    agentName = "System Planner (Agent 1)",
+                    subAgentName = "History Audit",
+                    actionDetails = "Database activity registry successfully purged. Restarting real-time trace logging.",
                     status = "SUCCESS"
                 )
             )
-        }
-    }
-
-    fun exportLogsToCSV(): String {
-        val format = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-        val builder = java.lang.StringBuilder()
-        builder.append("ID,TIMESTAMP,AGENT,SUB_AGENT,ACTION_DETAILS,STATUS\n")
-        logs.value.forEach {
-            val timeString = format.format(Date(it.timestamp))
-            // Escape double quotes in details to avoid CSV breakage
-            val escapedDetails = it.actionDetails.replace("\"", "\"\"")
-            builder.append("${it.id},\"$timeString\",\"${it.agentName}\",\"${it.subAgentName}\",\"$escapedDetails\",\"${it.status}\"\n")
-        }
-        return builder.toString()
-    }
-
-    fun exportLogsToTextFormat(): String {
-        val format = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-        val builder = java.lang.StringBuilder()
-        builder.append("================ OMNILINK AI AGENT ACTIVITY REPORT ================\n")
-        builder.append("Report Date: ${format.format(Date())}\n")
-        builder.append("Total Database Record Index: ${logs.value.size} active elements\n")
-        builder.append("-------------------------------------------------------------------\n\n")
-        logs.value.forEach {
-            val timeString = format.format(Date(it.timestamp))
-            builder.append("[$timeString] [${it.status}] ${it.agentName} (${it.subAgentName}):\n")
-            builder.append("  ↳ ${it.actionDetails}\n\n")
-        }
-        return builder.toString()
-    }
-
-    fun updateStoreLink(storeId: String, newLink: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val currentStore = stores.value.find { it.storeId == storeId }
-            if (currentStore != null) {
-                val updated = currentStore.copy(affiliateLink = newLink)
-                repository.insertStoreConfig(updated)
-                repository.insertLog(
-                    AgentLog(
-                        agentName = "System Controller",
-                        subAgentName = "Admin Command",
-                        actionDetails = "Updated connection link parameters for ${currentStore.storeName} to: $newLink",
-                        status = "SUCCESS"
-                    )
-                )
-            }
-        }
-    }
-
-    fun updateStoreStatusToggle(storeId: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val currentStore = stores.value.find { it.storeId == storeId }
-            if (currentStore != null) {
-                val newStatus = if (currentStore.status == "CONNECTED") "OFFLINE" else "CONNECTED"
-                repository.updateStoreStatus(storeId, newStatus)
-                repository.insertLog(
-                    AgentLog(
-                        agentName = "System Controller",
-                        subAgentName = "Admin Command",
-                        actionDetails = "Toggled ${currentStore.storeName} status state to $newStatus.",
-                        status = "SUCCESS"
-                    )
-                )
-            }
         }
     }
 }
